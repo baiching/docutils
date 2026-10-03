@@ -14,7 +14,7 @@ namespace Ltx {
 		~Utils() = default;
 
 	public:
-		void print_node(TSNode node, int depth = 0) const;
+		void print_node(TSNode node, uint32_t depth = 0) const;
 		void print_tree() const;
 
 		TSNode find_pos(uint32_t byte_offset) const;
