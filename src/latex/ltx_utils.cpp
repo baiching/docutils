@@ -51,4 +51,14 @@ namespace Ltx {
 		
 		print_node(root);
 	}
+
+	TSNode Utils::find_pos(uint32_t byte_offset) const {
+		if (!m_tree)
+		{
+			return {};
+		}
+
+		TSNode root = ts_tree_root_node(m_tree);
+		return ts_node_descendant_for_byte_range(root, byte_offset, byte_offset);
+	}
 }
