@@ -63,17 +63,6 @@ namespace Ltx {
 		other.m_query = nullptr;
 	}
 
-	Query& Query::operator=(Query&& other) noexcept {
-		if (this != &other) {
-			if (m_query) ts_query_delete(m_query);
-			m_query = other.m_query;
-			m_error_msg = std::move(other.m_error_msg);
-			m_error_offset = other.m_error_offset;
-			other.m_query = nullptr;
-		}
-		return *this;
-	}
-
 	/* for operators */
 	Query& Query::operator=(Query&& other) noexcept {
 		if (this != &other) {
