@@ -123,10 +123,14 @@ namespace Ltx {
 
 	public:
 		/* Query Status.
-		   is_valid() now means "the last rebuild succeeded", which is what the
-		   callers actually care about. Per-pattern failures do NOT poison the
-		   whole query; they show up in pattern_errors(). */
-		bool is_valid() const { return m_query != nullptr; }
+		   is_valid() describes the query as a whole: a language is set and every
+		   stored pattern compiled. An empty pattern list is valid, just empty -
+		   has_patterns() is what tells you whether anything can match.
+		   Per-pattern failures are reported separately by pattern_errors(), and a
+		   rejected add/remove leaves a previously working query working. */
+		bool is_valid() const {
+			return m_language != nullptr && (m_patterns.empty() || m_query != nullptr);
+		}
 		std::string_view error_message() const { return m_error_msg; }
 		uint32_t error_offset() const { return m_error_offset; }
 
