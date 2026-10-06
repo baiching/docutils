@@ -1,7 +1,7 @@
 
 
 # Add source to this project's executable.
-add_executable (docutils "docutils.cpp" "docutils.h" "latex/ltx_utils.cpp" "latex/ltx_query.cpp")
+add_executable (docutils "docutils.cpp" "docutils.h" "latex/ltx_utils.cpp" "latex/ltx_query.cpp" "latex/ltx_edit.cpp" "latex/ltx_document.cpp" "latex/ltx_cli.cpp")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET docutils PROPERTY CXX_STANDARD 20)
