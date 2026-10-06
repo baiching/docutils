@@ -333,6 +333,10 @@ namespace Ltx {
 	std::string_view Query::capture_name(uint32_t capture_id) const {
 		if (!m_query) return {};
 
+		/* ts_query_capture_name_for_id asserts on an out-of-range id in debug
+		   builds, so the bound is checked before calling into tree-sitter. */
+		if (capture_id >= ts_query_capture_count(m_query)) return {};
+
 		uint32_t name_len = 0;
 		const char* name_ptr = ts_query_capture_name_for_id(m_query, capture_id, &name_len);
 		if (!name_ptr) return {};
