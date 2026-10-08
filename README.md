@@ -9,15 +9,9 @@ embedding.
 
 ## Build
 
-```sh
-cmake --preset x64-debug
-cmake --build out/build/x64-debug
-ctest --test-dir out/build/x64-debug --output-on-failure
-```
-
 Needs CMake 3.16+ and a C++20 toolchain. tree-sitter v0.27.0 and GoogleTest
 v1.15.2 are fetched automatically; the LaTeX grammar is vendored in
-`third_party/`. Skip the tests with `-DDOCUTILS_BUILD_TESTS=OFF`.
+`third_party/`. 
 
 ## CLI contract
 
