@@ -4,37 +4,39 @@
 
 namespace Ltx {
 
-	TextEdit TextEdit::create(uint32_t at, std::string_view text) {
-		TextEdit edit;
+	Edit Buffer::make_insert(uint32_t at, std::string_view text) {
+		Edit edit;
 		edit.range = ByteRange{ at, at };
 		edit.text.assign(text);
-		edit.kind = EditKind::Create;
+		edit.type = EditType::Create;
+
 		return edit;
 	}
 
-	TextEdit TextEdit::update(ByteRange range, std::string_view text) {
-		TextEdit edit;
+	Edit Buffer::make_replace(ByteRange range, std::string_view text) {
+		Edit edit;
 		edit.range = range;
 		edit.text.assign(text);
-		edit.kind = EditKind::Update;
+		edit.type = EditType::Update;
+
 		return edit;
 	}
 
-	TextEdit TextEdit::remove(ByteRange range) {
-		TextEdit edit;
+	Edit Buffer::make_remove(ByteRange range) {
+		Edit edit;
 		edit.range = range;
-		edit.kind = EditKind::Delete;
+		edit.type = EditType::Delete;
 		return edit;
 	}
 
-	TSPoint point_for_byte(std::string_view source, uint32_t byte) {
-		if (byte > source.size()) byte = static_cast<uint32_t>(source.size());
+	TSPoint Buffer::point_at(uint32_t byte) const {
+		if (byte > size()) byte = size();
 
 		uint32_t row = 0;
 		uint32_t line_start = 0;
 
 		for (uint32_t i = 0; i < byte; ++i) {
-			if (source[i] == '\n') {
+			if (m_text[i] == '\n') {
 				++row;
 				line_start = i + 1;
 			}
@@ -43,65 +45,124 @@ namespace Ltx {
 		return TSPoint{ row, byte - line_start };
 	}
 
-	bool apply_edits(std::string& source, std::vector<TextEdit> edits, TSInputEdit& out_edit) {
-		if (edits.empty()) return false;
+	uint32_t Buffer::line_at(uint32_t byte) const {
+		return point_at(byte).row;
+	}
 
-		const uint32_t old_len = static_cast<uint32_t>(source.size());
+	uint32_t Buffer::column_at(uint32_t byte) const {
+		return point_at(byte).column;
+	}
 
-		/* Sort by start offset so overlap detection is a single pass. Stable so
-		   that edits sharing a start offset keep their relative order. */
+	/* -------------------------------------------------------------- private */
+
+	EditStatus Buffer::check(ByteRange range) const {
+		/* Reversed is invalid rather than empty, matching ByteRange::empty(). */
+		if (range.start > range.end) return EditStatus::OutOfBounds;
+		if (range.end > size()) return EditStatus::OutOfBounds;
+		return EditStatus::Ok;
+	}
+
+	EditStatus Buffer::record(const TSInputEdit& change) {
+		m_last_change = change;
+		++m_revision;
+		return EditStatus::Ok;
+	}
+
+	/* -------------------------------------------------------------- editing */
+
+	EditStatus Buffer::insert(uint32_t at, std::string_view text) {
+		return apply(make_insert(at, text));
+	}
+
+	EditStatus Buffer::replace(ByteRange range, std::string_view text) {
+		return apply(make_replace(range, text));
+	}
+
+	EditStatus Buffer::erase(ByteRange range) {
+		return apply(make_remove(range));
+	}
+
+	EditStatus Buffer::apply(Edit edit) {
+		return apply_all(std::vector<Edit>{ std::move(edit) });
+	}
+
+	EditStatus Buffer::apply_all(std::vector<Edit> edits) {
+		if (edits.empty()) return EditStatus::EmptyBatch;
+
+		const uint32_t old_len = size();
+
+		/* Deterministic order, independent of how the caller supplied the batch.
+		 *
+		 * Ascending start puts the edits back to front. The tie-break on end
+		 * matters: for two edits at the same offset, the zero-length one must
+		 * sort FIRST, because the walk below runs in reverse and a zero-length
+		 * insert has to be applied last to land outside the replacement rather
+		 * than inside it. Getting this backwards lets the insert's bytes be
+		 * overwritten by the very edit it was anchored to.
+		 *
+		 * stable_sort keeps caller order among genuinely equal ranges, so two
+		 * inserts at one offset appear in the order they were given. */
 		std::stable_sort(edits.begin(), edits.end(),
-			[](const TextEdit& a, const TextEdit& b) { return a.range.start < b.range.start; });
+			[](const Edit& a, const Edit& b) {
+				if (a.range.start != b.range.start) return a.range.start < b.range.start;
+				return a.range.end < b.range.end;
+			});
 
-		uint32_t prev_end = 0;
+		/* Validate the whole batch before writing anything: a rejected call must
+		 * leave the buffer byte-identical.
+		 *
+		 * Checking each edit only against its predecessor is sufficient. Sorted by
+		 * start, if no adjacent pair shares a byte then no pair shares a byte,
+		 * because s[j] >= s[i+1] >= e[i] for every j > i. */
 		for (size_t i = 0; i < edits.size(); ++i) {
-			const ByteRange range = edits[i].range;
+			const EditStatus bounds = check(edits[i].range);
+			if (bounds != EditStatus::Ok) return bounds;
 
-			/* Reject a reversed range or one past the end of the buffer. */
-			if (range.start > range.end || range.end > old_len) return false;
-
-			/* Reject overlap. Touching boundaries are fine, so a zero-length
-			   insert may sit at the edge of a replacement. */
-			if (i > 0 && range.start < prev_end) return false;
-
-			prev_end = range.end;
+			/* Touching is allowed; sharing a byte is not. A zero-length range has
+			 * end == start, so it never overlaps anything. */
+			if (i > 0 && edits[i].range.start < edits[i - 1].range.end) {
+				return EditStatus::Overlapping;
+			}
 		}
 
-		/* The batch is applied as one span: from the first change to the last.
-		   Every byte outside that span is untouched, so tree-sitter can reuse
-		   the corresponding subtrees. Points are captured against the pre-edit
-		   text, which is still intact at this stage. */
+		/* One spanning edit covers the batch, because ts_tree_edit takes exactly
+		 * one. Take the far end as a maximum rather than the last edit's end: a
+		 * trailing zero-length insert can start later than any real edit ends. */
 		const uint32_t span_start = edits.front().range.start;
-		const uint32_t span_old_end = edits.back().range.end;
 
-		const TSPoint start_point = point_for_byte(source, span_start);
-		const TSPoint old_end_point = point_for_byte(source, span_old_end);
-
-		/* Apply back to front so the offsets of the edits still pending stay
-		   valid as earlier regions are rewritten. */
-		for (auto it = edits.rbegin(); it != edits.rend(); ++it) {
-			source.replace(it->range.start, it->range.length(), it->text);
+		uint32_t span_old_end = 0;
+		for (const Edit& edit : edits) {
+			span_old_end = std::max(span_old_end, edit.range.end);
 		}
 
-		const uint32_t new_len = static_cast<uint32_t>(source.size());
+		/* Points against the pre-edit text, while it is still intact. */
+		const TSPoint start_point = point_at(span_start);
+		const TSPoint old_end_point = point_at(span_old_end);
 
-		/* Signed delta: the batch can shrink the buffer. */
-		const int64_t delta = static_cast<int64_t>(new_len) - static_cast<int64_t>(old_len);
-		const uint32_t new_end_byte =
-			static_cast<uint32_t>(static_cast<int64_t>(span_old_end) + delta);
+		/* Back to front, so each edit's offsets are still valid when it runs. */
+		for (auto it = edits.rbegin(); it != edits.rend(); ++it) {
+			m_text.replace(it->range.start, it->range.length(), it->text);
+		}
 
-		out_edit.start_byte = span_start;
-		out_edit.old_end_byte = span_old_end;
-		out_edit.new_end_byte = new_end_byte;
-		out_edit.start_point = start_point;
-		out_edit.old_end_point = old_end_point;
-		out_edit.new_end_point = point_for_byte(source, new_end_byte);
+		/* Signed: a batch can shrink the buffer. The region [span_start,
+		 * span_old_end) held span_old_end - span_start bytes and now holds that
+		 * plus the net delta, which puts the new end at span_old_end + delta. */
+		const int64_t delta =
+			static_cast<int64_t>(size()) - static_cast<int64_t>(old_len);
 
-		return true;
+		TSInputEdit change{};
+		change.start_byte = span_start;
+		change.old_end_byte = span_old_end;
+		change.new_end_byte = static_cast<uint32_t>(
+			static_cast<int64_t>(span_old_end) + delta);
+		change.start_point = start_point;
+		change.old_end_point = old_end_point;
+
+		/* Against the post-edit text, which point_at clamps if the arithmetic
+		 * ever lands outside it. */
+		change.new_end_point = point_at(change.new_end_byte);
+
+		return record(change);
 	}
 
-	bool apply_edit(std::string& source, const TextEdit& edit, TSInputEdit& out_edit) {
-		std::vector<TextEdit> single{ edit };
-		return apply_edits(source, std::move(single), out_edit);
-	}
 }
