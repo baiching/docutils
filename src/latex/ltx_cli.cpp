@@ -1,8 +1,9 @@
-#include "ltx_cli.hpp"
+#include "../includes/latex/ltx_cli.hpp"
 
-#include "ltx_document.hpp"
-#include "ltx_edit.hpp"
-#include "ltx_query.hpp"
+#include "../includes/latex/ltx_document.hpp"
+#include "../includes/latex/ltx_edit.hpp"
+#include "../includes/latex/ltx_query.hpp"
+#include "../includes/latex/ltx_utils.hpp"
 
 #include <tree_sitter/api.h>
 
@@ -91,7 +92,7 @@ namespace Ltx {
 			bool is_known(const std::string& key) {
 				if (takes_value(key)) return true;
 				return key == "--in-place" || key == "--dry-run" || key == "--all" ||
-					key == "--group" || key == "--help" || key == "--version";
+					key == "--help" || key == "--version";
 			}
 
 			struct Options
@@ -249,8 +250,8 @@ namespace Ltx {
 			std::string capture_json(const Capture& cap, std::string_view source) {
 				std::ostringstream out;
 				out << "{\"name\":" << quoted(cap.name)
-					<< ",\"capture_id\":" << cap.capture_id
-					<< ",\"node_type\":" << quoted(cap.node_type())
+					<< ",\"pattern_index\":" << cap.pattern_index
+					<< ",\"node_type\":" << quoted(cap.node_type)
 					<< ",\"start_byte\":" << cap.range.start
 					<< ",\"end_byte\":" << cap.range.end
 					<< ",\"line\":" << line_of(source, cap.range.start)
@@ -261,7 +262,7 @@ namespace Ltx {
 			}
 
 			void print_capture_text(const Capture& cap, std::string_view source) {
-				std::cout << cap.name << "\t" << cap.node_type()
+				std::cout << cap.name << "\t" << cap.node_type
 					<< "\t" << cap.range.start << ".." << cap.range.end
 					<< "\t" << line_of(source, cap.range.start) << ":" << column_of(source, cap.range.start)
 					<< "\t" << quoted(cap.text) << "\n";
@@ -281,35 +282,42 @@ namespace Ltx {
 			/* ----------------------------------------------------------- query */
 
 			/* Builds the query from every --query value and applies the filters
-			   that the query layer supports natively. */
-			/* `capture_storage` must outlive every use of `options`: the capture
-			   filter is a string_view, and binding it to the temporary returned by
-			   Options::value() would leave the view dangling. */
-			bool build_query(
+			   that the query layer supports natively.
+			   *
+			   * Returns nullopt and fills `err` on any failure. A Query is
+			   * immutable, so it is constructed once from the full pattern list
+			   * rather than grown one pattern at a time.
+			   *
+			   * `capture_storage` must outlive every use of `options`: binding the
+			   * capture filter to the temporary returned by Options::value() would
+			   * leave `options` holding a dead view. */
+			std::optional<Query> build_query(
+				const TSLanguage* language,
 				const Options& opts,
-				Query& query,
-				MatchOptions& options,
+				QueryOptions& options,
 				std::string& capture_storage,
 				std::string& err)
 			{
 				const std::vector<std::string> patterns = opts.values("--query");
 				if (patterns.empty()) {
 					err = "no query given; pass at least one --query '<pattern>'";
-					return false;
+					return std::nullopt;
 				}
 
-				for (const std::string& pattern : patterns) {
-					if (!query.add(pattern)) {
-						std::ostringstream detail;
-						detail << "pattern failed to compile: " << query.error_message();
-						const std::vector<PatternError>& errors = query.pattern_errors();
-						if (!errors.empty()) {
-							detail << " (pattern " << errors.front().pattern_index
-								<< " at offset " << errors.front().offset << ")";
-						}
-						err = detail.str();
-						return false;
+				/* Patterns compile as one batch: all succeed, or none do. A single
+				   bad pattern rejects the whole set rather than being silently
+				   dropped, so a typo cannot produce a quietly empty result. */
+				Query query(language, patterns);
+				if (!query.is_valid()) {
+					std::ostringstream detail;
+					detail << "pattern failed to compile: " << query.error_message();
+					const std::vector<PatternError>& errors = query.pattern_errors();
+					if (!errors.empty()) {
+						detail << " (pattern " << errors.front().pattern_index
+							<< " at offset " << errors.front().offset << ")";
 					}
+					err = detail.str();
+					return std::nullopt;
 				}
 
 				if (opts.has("--capture")) {
@@ -321,12 +329,12 @@ namespace Ltx {
 					uint32_t index = 0;
 					if (!parse_u32(opts.value("--pattern-index"), index)) {
 						err = "--pattern-index expects an integer";
-						return false;
+						return std::nullopt;
 					}
 					if (index >= query.pattern_count()) {
 						err = "--pattern-index " + std::to_string(index) + " is out of range ("
 							+ std::to_string(query.pattern_count()) + " pattern(s))";
-						return false;
+						return std::nullopt;
 					}
 					options.pattern_index = index;
 				}
@@ -335,7 +343,7 @@ namespace Ltx {
 					uint32_t limit = 0;
 					if (!parse_u32(opts.value("--limit"), limit)) {
 						err = "--limit expects an integer";
-						return false;
+						return std::nullopt;
 					}
 					options.limit = limit;
 				}
@@ -345,7 +353,7 @@ namespace Ltx {
 					const size_t colon = spec.find(':');
 					if (colon == std::string::npos) {
 						err = "--byte-range expects START:END";
-						return false;
+						return std::nullopt;
 					}
 
 					uint32_t start = 0;
@@ -353,16 +361,16 @@ namespace Ltx {
 					if (!parse_u32(std::string_view(spec).substr(0, colon), start) ||
 						!parse_u32(std::string_view(spec).substr(colon + 1), end)) {
 						err = "--byte-range expects START:END as integers";
-						return false;
+						return std::nullopt;
 					}
 					if (start > end) {
 						err = "--byte-range START must not exceed END";
-						return false;
+						return std::nullopt;
 					}
 					options.byte_range = ByteRange{ start, end };
 				}
 
-				return true;
+				return std::optional<Query>(std::move(query));
 			}
 
 			/* Loads the language, then the file, then parses into a document.
@@ -449,84 +457,42 @@ namespace Ltx {
 				if (!opened) return fail("input_error", err, opts);
 				Document& document = *opened;
 
-				Query query(document.language());
-				MatchOptions options;
-				std::string capture_name;
-				if (!build_query(opts, query, options, capture_name, err)) {
-					return fail("query_error", err, opts);
-				}
+				QueryOptions options;
+				std::string capture_storage;
+				std::optional<Query> built =
+					build_query(document.language(), opts, options, capture_storage, err);
+				if (!built) return fail("query_error", err, opts);
+				const Query& query = *built;
 
 				const std::string_view source = document.source();
-				const bool grouped = opts.has("--group");
 				const bool text = is_text_format(opts);
 
+				const std::vector<Capture> captures = document.captures(query, options);
+				const uint32_t matched = static_cast<uint32_t>(captures.size());
+
 				std::ostringstream body;
-				uint32_t matched = 0;
 
-				if (grouped) {
-					const std::vector<Match> matches = document.matches(query, options);
-					matched = static_cast<uint32_t>(matches.size());
+				if (!text) {
+					body << "{\"command\":\"query\",\"file\":" << quoted(path)
+						<< ",\"parse_errors\":" << (document.has_errors() ? "true" : "false")
+						<< ",\"pattern_count\":" << query.pattern_count()
+						<< ",\"capture_count\":" << query.capture_count()
+						<< ",\"matched\":" << matched
+						<< ",\"captures\":[";
 
-					if (!text) {
-						body << "{\"command\":\"query\",\"file\":" << quoted(path)
-							<< ",\"parse_errors\":" << (document.has_errors() ? "true" : "false")
-							<< ",\"matched\":" << matched
-							<< ",\"matches\":[";
-
-						bool first_match = true;
-						for (const Match& match : matches) {
-							if (!first_match) body << ",";
-							first_match = false;
-
-							body << "{\"pattern_index\":" << match.pattern_index
-								<< ",\"pattern_source\":" << quoted(match.pattern_source)
-								<< ",\"start_byte\":" << match.range().start
-								<< ",\"end_byte\":" << match.range().end
-								<< ",\"captures\":[";
-
-							bool first_capture = true;
-							for (const Capture& cap : match.captures) {
-								if (!first_capture) body << ",";
-								first_capture = false;
-								body << capture_json(cap, source);
-							}
-							body << "]}";
-						}
-						body << "]}";
-					} else {
-						for (const Match& match : matches) {
-							std::cout << "match " << match.pattern_index << "\n";
-							for (const Capture& cap : match.captures) {
-								std::cout << "  ";
-								print_capture_text(cap, source);
-							}
-						}
+					bool first = true;
+					for (const Capture& cap : captures) {
+						if (!first) body << ",";
+						first = false;
+						body << capture_json(cap, source);
 					}
+					body << "]}";
+
+					print_json(body.str());
 				} else {
-					const std::vector<Capture> captures = document.captures(query, options);
-					matched = static_cast<uint32_t>(captures.size());
-
-					if (!text) {
-						body << "{\"command\":\"query\",\"file\":" << quoted(path)
-							<< ",\"parse_errors\":" << (document.has_errors() ? "true" : "false")
-							<< ",\"pattern_count\":" << query.pattern_count()
-							<< ",\"capture_count\":" << query.capture_count()
-							<< ",\"matched\":" << matched
-							<< ",\"captures\":[";
-
-						bool first = true;
-						for (const Capture& cap : captures) {
-							if (!first) body << ",";
-							first = false;
-							body << capture_json(cap, source);
-						}
-						body << "]}";
-					} else {
-						for (const Capture& cap : captures) print_capture_text(cap, source);
-					}
+					for (const Capture& cap : captures) print_capture_text(cap, source);
 				}
 
-				if (!text) print_json(body.str());
 				return matched > 0 ? kOk : kNoMatch;
 			}
 
@@ -548,12 +514,12 @@ namespace Ltx {
 				if (!opened) return fail("input_error", err, opts);
 				Document& document = *opened;
 
-				Query query(document.language());
-				MatchOptions options;
-				std::string capture_name;
-				if (!build_query(opts, query, options, capture_name, err)) {
-					return fail("query_error", err, opts);
-				}
+				QueryOptions options;
+				std::string capture_storage;
+				std::optional<Query> built =
+					build_query(document.language(), opts, options, capture_storage, err);
+				if (!built) return fail("query_error", err, opts);
+				const Query& query = *built;
 
 				const std::string_view source = document.source();
 				const std::vector<Capture> found = document.captures(query, options);
@@ -581,7 +547,7 @@ namespace Ltx {
 					std::string after;
 				};
 
-				std::vector<TextEdit> edits;
+				std::vector<Edit> edits;
 				std::vector<Planned> planned;
 				edits.reserve(targets.size());
 				planned.reserve(targets.size());
@@ -593,17 +559,17 @@ namespace Ltx {
 						entry.range = cap.range;
 						entry.before.assign(cap.text);
 						entry.after = inserted;
-						edits.push_back(TextEdit::update(cap.range, inserted));
+						edits.push_back(Buffer::make_replace(cap.range, inserted));
 					} else if (command == "erase") {
 						entry.range = cap.range;
 						entry.before.assign(cap.text);
-						edits.push_back(TextEdit::remove(cap.range));
+						edits.push_back(Buffer::make_remove(cap.range));
 					} else {
 						const uint32_t offset = (at == "before") ? cap.range.start : cap.range.end;
 						/* An insertion replaces no existing bytes. */
 						entry.range = ByteRange{ offset, offset };
 						entry.after = inserted;
-						edits.push_back(TextEdit::create(offset, inserted));
+						edits.push_back(Buffer::make_insert(offset, inserted));
 					}
 
 					entry.line = line_of(source, entry.range.start);
@@ -771,7 +737,6 @@ namespace Ltx {
 					"  --pattern-index N    Only matches from this pattern\n"
 					"  --byte-range A:B     Restrict the search to a byte range\n"
 					"  --limit N            Stop after N results\n"
-					"  --group              query: report whole matches instead of flat captures\n"
 					"  --format json|text   Output format (default json)\n"
 					"\n"
 					"EDIT SELECTION\n"

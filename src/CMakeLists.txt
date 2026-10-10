@@ -19,6 +19,8 @@ set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "Build static libraries")
 # 3. Download and make the targets available
 FetchContent_MakeAvailable(tree-sitter)
 
+#add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/includes)
+
 add_library(docutils_lib STATIC
     "latex/ltx_utils.cpp"
     "latex/ltx_query.cpp"
@@ -29,11 +31,12 @@ add_library(docutils_lib STATIC
 
 # Public: consumers (the CLI and the tests) include "latex/..." relative to
 # this directory, and inherit the tree-sitter include path through the link.
-target_include_directories(docutils_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# This is the only entry that matters: src/ itself holds sources, not headers.
+target_include_directories(docutils_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includes)
 
 target_link_libraries(docutils_lib PUBLIC tree-sitter tree-sitter-latex)
 
 # Add source to this project's executable.
-add_executable (docutils "docutils.cpp" "docutils.h")
+add_executable (docutils "docutils.cpp" "includes/docutils.h")
 
 target_link_libraries(docutils PRIVATE docutils_lib)

@@ -1,4 +1,4 @@
-#include "ltx_utils.hpp"
+#include "../includes/latex/ltx_utils.hpp"
 
 #include <string>
 #include <iostream>
@@ -6,6 +6,22 @@
 #include <tree_sitter/api.h>
 
 namespace Ltx {
+
+	TSPoint point_for_byte(std::string_view source, uint32_t byte_offset) {
+		if (byte_offset > source.length()) byte_offset = static_cast<uint32_t>(source.length());
+
+		uint32_t row = 0;
+		uint32_t line_start = 0;
+
+		for (uint32_t i = 0; i < byte_offset; ++i) {
+			if (source[i] == '\n') {
+				++row;
+				line_start = i + 1;
+			}
+		}
+
+		return TSPoint{ row, byte_offset - line_start };
+	}
 
 	Utils::Utils(TSTree* tree, std::string_view source) : m_tree(tree), m_source(source) {
 

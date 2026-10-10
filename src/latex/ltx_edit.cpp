@@ -1,4 +1,4 @@
-#include "ltx_edit.hpp"
+#include "../includes/latex/ltx_edit.hpp"
 
 #include <algorithm>
 
